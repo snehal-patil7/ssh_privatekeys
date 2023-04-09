@@ -31,9 +31,4 @@ resource "null_resource" "secrets_files" {
   provisioner "local-exec" {
     command = "echo '${data.aws_secretsmanager_secret_version.secrets[data.aws_secretsmanager_secret.secrets[each.key].name].secret_string}' > ${each.value}"
   }
-
-  provisioner "local-exec" {
-  command = "cd ssh_privatekeys && mkdir -p .secrets && cp ../${each.value} .secrets && git add .secrets && git commit -m \"Add ${each.value}\" && git push origin master"
-}
-
 }
