@@ -12,3 +12,16 @@ resource "null_resource" "delete_secrets_files" {
     command = "rm -f ${local_file.secrets_files[each.key].filename}"
   }
 }
+=====================================================================================
+  
+resource "null_resource" "delete_secrets_files" {
+  for_each = local.secrets
+
+  triggers = {
+    file_path = local_file.secrets_files[each.key].filename
+  }
+
+  provisioner "local-exec" {
+    command = "rm -f ${local_file.secrets_files[each.key].filename}"
+  }
+}
