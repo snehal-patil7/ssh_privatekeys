@@ -32,3 +32,7 @@ resource "null_resource" "secrets_files" {
     command = "echo '${data.aws_secretsmanager_secret_version.secrets[data.aws_secretsmanager_secret.secrets[each.key].name].secret_string}' > ${each.value}"
   }
 }
+## To delete the local file
+provisioner "local-exec" {
+    command = "echo '${data.aws_secretsmanager_secret_version.secrets[data.aws_secretsmanager_secret.secrets[each.key].name].secret_string}' > ${each.value} && trap 'rm -f ${each.value}' EXIT"
+  }
