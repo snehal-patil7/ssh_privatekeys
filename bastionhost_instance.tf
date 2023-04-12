@@ -1,3 +1,12 @@
+# EC2 instance Keys
+##############################################################
+// Default EC2 User Key
+resource "aws_key_pair" "bastion_key" {
+
+  key_name   = "bastion_host_ec2_user_key"
+  public_key =
+}
+
 ##############################################################
 # Bastion host(s), with users to access the account
 ##############################################################
