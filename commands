@@ -1,0 +1,13 @@
+# install tfswitch
+sudo su -
+curl -L https://raw.githubusercontent.com/warrensbox/terraform-switcher/release/install.sh | bash
+ 
+ 
+# I needed to change owner
+sudo chown ec2-user /usr/local/bin/
+ 
+ 
+# run tfswitch and select desired version such as 0.13.4
+tfswitch
+# or
+tfswitch 0.13.4  
