@@ -1,0 +1,246 @@
+###############################################################################
+# this playbook is used to setup the bastion hosts initially
+# It will at least:
+# - update the system
+# - install needed packages
+# - configure SSH
+# - configure SSSD ( the BIND USer and PW will be taken from SSM parameters)
+# - configure sudo
+# - install needed packages
+#
+# for debug use: ansible-playbook playbook.yml -e "SSM=True extrahostname=<HOSTNAME for the Instance> extraefsid=<EFS Filesystem ID>"
+# MAR (c) Apr 2020    - marko.rautenberg@vodafone.com
+###############################################################################
+- hosts: localhost
+  become: yes
+  become_method: sudo
+
+  environment:
+    http_proxy: "http://proxy.{{ proxyPrefix }}:3128"
+    https_proxy: "http://proxy.{{ proxyPrefix }}:3128"
+    no_proxy: 169.254.169.254, localhost
+
+  tasks:
+
+  - name: set the hostname 
+    hostname:
+      name: "{{ extrahostname }}"     # this extrahostname will be feed in as EXTRAVARS to the playbook (in terraform configurable)
+      
+  - name: update the system           # update to latest patch level
+    yum:
+      name: "*"
+      state: latest
+        
+  - name: install packages            # install some needed packages
+    vars:
+      packages:
+        - bash-completion
+        - git
+        - amazon-efs-utils
+        - sssd 
+        - sssd-client 
+        - openldap  
+        - openldap-clients 
+        - sssd-tools.x86_64
+        - amazon-ssm-agent
+        - python-pip
+        - postfix
+        - mailx
+        - https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+    yum:
+      name: "{{ packages }}"
+      validate_certs: no
+      state: present
+
+  - name: install boto for AWS     # BOTO have to be installed to use some AWs features in ansible (like caller_info)
+    pip: 
+      name: 
+      - boto3
+      - botocore
+
+  - name: Get the current caller identity information (accountno)   # get account number out of AWS
+    aws_caller_info:
+    register: caller_info
+    
+  - name: Creating Mountpoint for NFS Filesystem                    # the Mountpoint for the NFS
+    file:
+      path: /h
+      state: directory
+      mode: '0755'
+
+  - name: Mount share storage on Linux system                       # mount (persistant) the EFS - EFS ID taken from EXTRA_VARS (terraform)
+    mount:
+      path: /h
+      src: "{{ extraefsid }}"
+      fstype: efs
+      opts: defaults,_netdev
+      boot: true
+      state: mounted
+      fstab: /etc/fstab
+
+  - name: copy sssd.conf                                           # copy the sssd.conf template to the system
+    copy:
+      src: sssd.conf
+      dest: /etc/sssd/sssd.conf
+      owner: root
+      group: root
+      mode: 0700 
+
+  - name: exchange the 147101433358 placeholder in sssd.conf  # exchange the placeholer in sssd.conf with the real account-number
+    replace:
+      path: /etc/sssd/sssd.conf
+      regexp: '147101433358'
+      replace: '{{caller_info.account}}'
+
+      
+  - name: copy Vf CA Chain                                          # ensure that the VF PKI CA Chain to allow LDAPS
+    copy:
+      src: VCA_Internal_SHA2_CA_Chain.pem
+      dest: /etc/ssl/certs/VCA_Internal_SHA2_CA_Chain.pem
+      owner: root
+      group: root
+      mode: 0755
+      
+
+  - name: change  BIND DN in sssh.conf                              # configure BINDDN (parameter taken from SSM-Parameter - allows easily exchange of the LDAp BINDUSER later on)
+    lineinfile:
+      path: /etc/sssd/sssd.conf
+      regexp: '^ldap_default_bind_dn ='
+      state: present
+      backup: true
+      line: ldap_default_bind_dn = {{ lookup('aws_ssm', '/LandingZone/Ansible/SSSD_BIND_USER', region='eu-central-1' ) }}
+    notify:
+    - restart sssd
+
+  - name: change obfuscated pasword in sssh.conf                  # configure BINDPW (parameter taken from SSM-Parameter - allows easily exchange of the LDAp BINDPW later on)
+    lineinfile:
+      path: /etc/sssd/sssd.conf
+      regexp: '^ldap_default_authtok ='
+      state: present
+      line: ldap_default_authtok = {{ lookup('aws_ssm', '/LandingZone/Ansible/SSSD_OBFUSCATED', region='eu-central-1' ) }}
+    notify:
+    - restart sssd
+          
+  - name: change ClientAliveInterval in sshd_config               # setup some useful values in SSHD_CONFIG
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#ClientAliveInterval 0'
+      state: present
+      line: 'ClientAliveInterval 90'
+          
+  - name: change ClientAliveCountMax in sshd_config               # setup some useful values in SSHD_CONFIG
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#ClientAliveCountMax'
+      state: present
+      line: 'ClientAliveCountMax 3'
+        
+  - name: enable PasswordAuthentication=yes in sshd_config        # setup some useful values in SSHD_CONFIG
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#PasswordAuthentication yes'
+      state: present
+      line: 'PasswordAuthentication yes'
+          
+  - name: comment out PasswordAuthentication=no in sshd_config    # setup some useful values in SSHD_CONFIG
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^PasswordAuthentication no'
+      state: present
+      line: '#PasswordAuthentication no'
+          
+  - name: copy *_priv_host_key to /etc/ssh                        # copy the private host_keys to SSh dir (needed if 2 bastion hosts are behind a LB)
+    copy:
+      src: "{{ item }}"
+      dest: '/etc/ssh'
+      owner: root
+      group: root
+      mode: 0700
+    loop:
+      - ssh_host_ecdsa_key
+      - ssh_host_ed25519_key
+          
+  - name: copy *_priv_host_key.pub to /etc/ssh                    # copy the public host_keys to SSh dir (needed if 2 bastion hosts are behind a LB)
+    copy:
+      src: "{{item}}"
+      dest: '/etc/ssh'
+      owner: root
+      group: root
+      mode: 0755
+    loop:
+      - ssh_host_ecdsa_key.pub
+      - ssh_host_ed25519_key.pub
+          
+  - name: restart service sshd                                    # restart sshd to ensure that setting are activated
+    systemd:
+      state: restarted
+      daemon_reload: yes
+      name: sshd
+          
+  - name: ensure timeszone is set correct  in /etc/localtime      # set the timezone to GMT+1(2)
+    file:
+      src: /usr/share/zoneinfo/Europe/Berlin
+      dest: /etc/localtime
+      owner: root
+      group: root
+      state: link
+      force: true
+          
+  
+  - name: copy motd                                               # copy the prepared  motd to get some useful informations at login
+    copy:
+      src: 75-names
+      dest: /etc/update-motd.d/
+      owner: root
+      group: root
+      mode: 0755
+    
+  - name: enable admin group to do sudo all                       # enable admin group for sudo
+    lineinfile:
+      path: /etc/sudoers
+      state: present
+      backup: true
+      line: '%admin ALL=(ALL:ALL) NOPASSWD: ALL'
+      validate: 'visudo -cf %s'
+
+  - name: run  authconfig                                          # modify authconfig to recognize sssd settings 
+    command: /sbin/authconfig --update --enablesssd --enablesssdauth  --enablemkhomedir
+
+  - name: add ad-user group
+    group:
+      name: ad-user
+      gid: 1619400513
+      state: present
+
+  - name: configure postfix                                       # confgure postfix, so emails can be send out from system
+    blockinfile:
+      path: /etc/postfix/main.cf
+      insertafter: EOF
+      block: |
+        relayhost = appsmtp-north.internal.vodafone.com:25
+        inet_interfaces = 127.0.0.1
+  
+  - name: Configure cloudwatch agent 
+    shell: |
+      /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c "ssm:/LandingZone/Bastion/CW/CONFIG" -s
+
+        
+  - name: restart service sssd                                    #  restart the SSSD to ensure activated configuration
+    systemd:
+      state: restarted
+      daemon_reload: yes
+      name: sssd    
+          
+  - name: restart service ssm-agent                               # restart the SSM 
+    systemd:
+      state: started
+      name: amazon-ssm-agent
+  
+  
+  handlers:                                                       # this handler is used to restart sssd if changes in sssd.conf occur
+    - name: restart sssd
+      service:
+        name: sssd
+        state: restarted
+        
+# END of playbook
